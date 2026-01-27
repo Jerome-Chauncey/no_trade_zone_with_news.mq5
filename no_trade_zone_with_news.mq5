@@ -367,9 +367,28 @@ void SetupTPLevels()
 }
 void PlacePendingOrders()
 {
-   BuyTicket  = trade.BuyStop (LotSize,NTZHigh+_Point,Sym,NTZLow-_Point,0,0,Slippage);
-   SellTicket = trade.SellStop(LotSize,NTZLow-_Point, Sym,NTZHigh+_Point,0,0,Slippage);
+   double ask = SymbolInfoDouble(Sym, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(Sym, SYMBOL_BID);
+
+   double buyStopPrice  = NTZHigh + _Point;
+   double sellStopPrice = NTZLow  - _Point;
+
+   // Validation check
+   if(buyStopPrice > ask && sellStopPrice < bid)
+   {
+      BuyTicket  = trade.BuyStop(LotSize, buyStopPrice, Sym, sellStopPrice, 0, 0, Slippage);
+      SellTicket = trade.SellStop(LotSize, sellStopPrice, Sym, buyStopPrice, 0, 0, Slippage);
+
+      PrintFormat("✅ Orders placed | BuyStop: %.5f vs Ask: %.5f | SellStop: %.5f vs Bid: %.5f",
+                  buyStopPrice, ask, sellStopPrice, bid);
+   }
+   else
+   {
+      PrintFormat("🛑 Invalid stop levels — BuyStop: %.5f vs Ask: %.5f | SellStop: %.5f vs Bid: %.5f",
+                  buyStopPrice, ask, sellStopPrice, bid);
+   }
 }
+
 void DrawTPLevels()
 {
    for(int i=1;i<=TargetCount;i++)
