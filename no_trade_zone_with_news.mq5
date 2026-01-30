@@ -132,13 +132,125 @@ void CancelPendingOrders()
 //+------------------------------------------------------------------+
 //| Expert initialization                                           |
 //+------------------------------------------------------------------+
+void InitSessionSeparatorsAndNTZ()
+{
+   datetime now = TimeCurrent();
+   MqlDateTime dt; TimeToStruct(now, dt);
+
+   datetime todayStart = StringToTime(StringFormat("%04d.%02d.%02d 00:00", dt.year, dt.mon, dt.day));
+
+   // Asia starts 03:00
+   if(dt.hour >= 3)  DrawSessionSeparator(todayStart + 3*3600, clrYellow, PREF_ASIAN);
+   // Frankfurt starts 09:00
+   if(dt.hour >= 9)  DrawSessionSeparator(todayStart + 9*3600, clrBlue, PREF_FRANK);
+   // London starts 10:00
+   if(dt.hour >= 10) DrawSessionSeparator(todayStart + 10*3600, clrGreen, PREF_LON);
+   // New York starts 16:00
+   if(dt.hour >= 16) DrawSessionSeparator(todayStart + 16*3600, clrRed, PREF_NY);
+
+   // âœ… Backfill NTZ box if past 10:00
+   if(dt.hour >= 10)
+   {
+      datetime frankStart = todayStart + 9*3600;
+      datetime frankEnd   = frankStart + 3600;
+
+      int startBar = iBarShift(Sym, PERIOD_M1, frankStart, false);
+      int endBar   = iBarShift(Sym, PERIOD_M1, frankEnd, false);
+
+      NTZHigh = -DBL_MAX; NTZLow = DBL_MAX;
+      for(int i=startBar; i>=endBar; i--)
+      {
+         double hi = iHigh(Sym, PERIOD_M1, i);
+         double lo = iLow (Sym, PERIOD_M1, i);
+         if(hi>NTZHigh) NTZHigh=hi;
+         if(lo<NTZLow)  NTZLow=lo;
+      }
+      NTZRange = NTZHigh - NTZLow;
+      DrawNTZBox();
+   }
+}
+
 int OnInit()
 {
    Sym = StringLen(TradeSymbol)>0 ? TradeSymbol : _Symbol;
    trade.SetExpertMagicNumber(MagicNumber);
    EnsureRangeLabel();
+
+   datetime now = TimeCurrent(); 
+   MqlDateTime dt; TimeToStruct(now, dt);
+   lastResetDate = dt.year*10000 + dt.mon*100 + dt.day;
+
+   NO_TRADE_TODAY=false;
+   DoNotTradeDay =false;
+   LondonClosed  =false;
+   frankOpen     =0;
+   OrdersPlaced  =false;
+   NTZDefined    =false;
+   PositionOpened=false;
+   lastHour      =-1;
+   AsiaHigh=-DBL_MAX; AsiaLow=DBL_MAX;
+   NTZHigh=-DBL_MAX; NTZLow=DBL_MAX; NTZRange=0.0;
+
+   CancelPendingOrders();
+   ClearDailyLines();
+   EnsureRangeLabel();
+   InitSessionSeparatorsAndNTZ();
+
+
+   // âœ… Immediately calculate Asian range up to now
+   if(dt.hour >= 3) InitAsiaRange();
+
+   // âœ… If past 10:00, backfill NTZ range
+   if(dt.hour >= 10)
+   {
+      datetime frankStart = StringToTime(StringFormat("%04d.%02d.%02d 09:00", dt.year, dt.mon, dt.day));
+      datetime frankEnd   = frankStart + 3600;
+
+      int startBar = iBarShift(Sym, PERIOD_M1, frankStart, false);
+      int endBar   = iBarShift(Sym, PERIOD_M1, frankEnd, false);
+
+      NTZHigh = -DBL_MAX; NTZLow = DBL_MAX;
+      for(int i=startBar; i>=endBar; i--)
+      {
+         double hi = iHigh(Sym, PERIOD_M1, i);
+         double lo = iLow (Sym, PERIOD_M1, i);
+         if(hi>NTZHigh) NTZHigh=hi;
+         if(lo<NTZLow)  NTZLow=lo;
+      }
+      NTZRange = NTZHigh - NTZLow;
+      DrawNTZBox();
+   }
+
+   // âœ… Check todayâ€™s news immediately
+   FetchNewsFromFF();
+   if(NO_TRADE_TODAY) Print("ðŸ›‘ Halted for CSV blocker");
+
    return(INIT_SUCCEEDED);
 }
+
+
+void InitAsiaRange()
+{
+   AsiaHigh = -DBL_MAX;
+   AsiaLow  = DBL_MAX;
+
+   datetime now = TimeCurrent();
+   MqlDateTime dt; TimeToStruct(now, dt);
+
+   datetime asiaStart = StringToTime(StringFormat("%04d.%02d.%02d 03:00", dt.year, dt.mon, dt.day));
+
+   int startBar = iBarShift(Sym, PERIOD_M1, asiaStart, false);
+   int endBar   = iBarShift(Sym, PERIOD_M1, now, false);
+
+   for(int i=startBar; i>=endBar; i--)
+   {
+      double hi = iHigh(Sym, PERIOD_M1, i);
+      double lo = iLow (Sym, PERIOD_M1, i);
+      if(hi>AsiaHigh) AsiaHigh=hi;
+      if(lo<AsiaLow)  AsiaLow=lo;
+   }
+}
+
 
 //+------------------------------------------------------------------+
 //| Expert deinitialization                                         |
@@ -152,38 +264,60 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 //| Fetch news from Forex Factory JSON feed                         |
 //+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Fetch news from Forex Factory JSON feed (filter by today)        |
+//+------------------------------------------------------------------+
 void FetchNewsFromFF()
 {
    string url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
-   uchar post[];          // empty request body
-   uchar result[];        // response body
-   string result_headers; // response headers
+   uchar post[]; uchar result[]; string result_headers;
 
-   int res = WebRequest("GET", url, "", "", 5000, post, 0, result, result_headers);
-
+   int res = WebRequest("GET", url, "", "", 10000, post, 0, result, result_headers);
    if(res == -1)
    {
-      PrintFormat("❌ WebRequest failed (%d)", GetLastError());
+      PrintFormat("WebRequest failed (%d)", GetLastError());
       return;
    }
 
    string json = CharArrayToString(result);
 
-   string blockers[] = {"Payroll","FOMC","ECB","Fed","Retail Sales","Holiday"};
+   // Today's date string in feed format (YYYY-MM-DD)
+   datetime now = TimeCurrent();
+   MqlDateTime dt; TimeToStruct(now, dt);
+   string todayStr = StringFormat("%04d-%02d-%02d", dt.year, dt.mon, dt.day);
 
-   for(int i=0; i<ArraySize(blockers); i++)
+   // âœ… Blockers list
+   string blockers[] = {"Non-farm Employment Change","FOMC","ECB","Fed","Retail Sales","Holiday"};
+
+   // Split JSON into individual events
+   string events[];
+   int cnt = StringSplit(json, '{', events);
+
+   for(int i=0; i<cnt; i++)
    {
-      if(StringFind(json, blockers[i]) >= 0)
+      string ev = events[i];
+
+      // Only check events that contain today's date
+      if(StringFind(ev, todayStr) >= 0)
       {
-         NO_TRADE_TODAY = true;
-         PrintFormat("🚫 Blocker today: %s", blockers[i]);
-         break;
+         for(int j=0; j<ArraySize(blockers); j++)
+         {
+            if(StringFind(ev, blockers[j]) >= 0)
+            {
+               NO_TRADE_TODAY = true;
+               PrintFormat("Blocker today: %s", blockers[j]);
+               return;
+            }
+         }
       }
    }
 
-   Print("📢 FF JSON snippet (first 200 chars):");
+   Print("FF JSON snippet (first 200 chars):");
    Print(StringSubstr(json,0,200));
 }
+
+
 
 
 
