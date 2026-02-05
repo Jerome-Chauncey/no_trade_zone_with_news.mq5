@@ -270,52 +270,86 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void FetchNewsFromFF()
 {
-   string url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
-   uchar post[]; uchar result[]; string result_headers;
+   NO_TRADE_TODAY = false;
 
-   int res = WebRequest("GET", url, "", "", 10000, post, 0, result, result_headers);
+   string url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
+   uchar post[], result[];
+   string headers;
+
+   int res = WebRequest("GET", url, "", "", 10000, post, 0, result, headers);
    if(res == -1)
    {
-      PrintFormat("WebRequest failed (%d)", GetLastError());
+      PrintFormat("WebRequest failed: %d", GetLastError());
       return;
    }
 
    string json = CharArrayToString(result);
 
-   // Today's date string in feed format (YYYY-MM-DD)
-   datetime now = TimeCurrent();
-   MqlDateTime dt; TimeToStruct(now, dt);
-   string todayStr = StringFormat("%04d-%02d-%02d", dt.year, dt.mon, dt.day);
+   datetime nowUTC = TimeGMT();
+   MqlDateTime todayUTC;
+   TimeToStruct(nowUTC, todayUTC);
+   int todayKey = todayUTC.year*10000 + todayUTC.mon*100 + todayUTC.day;
 
-   // âœ… Blockers list
-   string blockers[] = {"Non-farm Employment Change","FOMC","ECB","Fed","Retail Sales","Holiday"};
+   string blockers[] =
+   {
+      "Non-Farm Employment Change",
+      "Non-farm Employment Change",
+      "FOMC",
+      "ECB",
+      "Fed",
+      "Retail Sales",
+      "Holiday"
+   };
 
-   // Split JSON into individual events
+   bool foundAny = false;
+
    string events[];
-   int cnt = StringSplit(json, '{', events);
+   int n = StringSplit(json, '{', events);
 
-   for(int i=0; i<cnt; i++)
+   for(int i = 0; i < n; i++)
    {
       string ev = events[i];
 
-      // Only check events that contain today's date
-      if(StringFind(ev, todayStr) >= 0)
+      int dpos = StringFind(ev, "\"date\":\"");
+      int tpos = StringFind(ev, "\"title\":\"");
+      if(dpos < 0 || tpos < 0) continue;
+
+      string dateStr = StringSubstr(ev, dpos + 8, 19);
+      datetime evTime = StringToTime(dateStr);
+
+      MqlDateTime evUTC;
+      TimeToStruct(evTime, evUTC);
+      int evKey = evUTC.year*10000 + evUTC.mon*100 + evUTC.day;
+
+      if(evKey != todayKey) continue;
+
+      string title = StringSubstr(ev, tpos + 9);
+      int endq = StringFind(title, "\"");
+      if(endq > 0) title = StringSubstr(title, 0, endq);
+
+      for(int j = 0; j < ArraySize(blockers); j++)
       {
-         for(int j=0; j<ArraySize(blockers); j++)
+         if(StringFind(title, blockers[j]) >= 0)
          {
-            if(StringFind(ev, blockers[j]) >= 0)
-            {
-               NO_TRADE_TODAY = true;
-               PrintFormat("Blocker today: %s", blockers[j]);
-               return;
-            }
+            PrintFormat("NEWS BLOCKER TODAY: %s | %s", title, dateStr);
+            foundAny = true;
+            break;
          }
       }
    }
 
-   Print("FF JSON snippet (first 200 chars):");
-   Print(StringSubstr(json,0,200));
+   if(foundAny)
+   {
+      NO_TRADE_TODAY = true;
+      Print("🛑 Trading halted due to news blockers today");
+   }
+   else
+   {
+      Print("No blocking news today");
+   }
 }
+
+
 
 
 
