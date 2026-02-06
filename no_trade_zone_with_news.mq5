@@ -285,10 +285,14 @@ void FetchNewsFromFF()
 
    string json = CharArrayToString(result);
 
-   datetime nowUTC = TimeGMT();
-   MqlDateTime todayUTC;
-   TimeToStruct(nowUTC, todayUTC);
-   int todayKey = todayUTC.year*10000 + todayUTC.mon*100 + todayUTC.day;
+   // Broker day reference
+   datetime nowBroker = TimeCurrent();
+   MqlDateTime td;
+   TimeToStruct(nowBroker, td);
+   int todayKey = td.year*10000 + td.mon*100 + td.day;
+
+   // Broker â†” UTC offset
+   int brokerOffset = (int)(TimeCurrent() - TimeGMT());
 
    string blockers[] =
    {
@@ -314,15 +318,33 @@ void FetchNewsFromFF()
       int tpos = StringFind(ev, "\"title\":\"");
       if(dpos < 0 || tpos < 0) continue;
 
-      string dateStr = StringSubstr(ev, dpos + 8, 19);
-      datetime evTime = StringToTime(dateStr);
+      // Full ISO timestamp with offset
+      // Example: 2026-02-05T04:00:00-05:00
+      string fullDate = StringSubstr(ev, dpos + 8, 25);
 
-      MqlDateTime evUTC;
-      TimeToStruct(evTime, evUTC);
-      int evKey = evUTC.year*10000 + evUTC.mon*100 + evUTC.day;
+      string base = StringSubstr(fullDate, 0, 19);
+      string tz   = StringSubstr(fullDate, 19);
 
+      datetime localTime = StringToTime(base);
+
+      // Parse timezone offset
+      int sign  = (StringSubstr(tz, 0, 1) == "-" ? -1 : 1);
+      int hours = (int)StringToInteger(StringSubstr(tz, 1, 2));
+      int mins  = (int)StringToInteger(StringSubstr(tz, 4, 2));
+      int tzOffset = sign * (hours*3600 + mins*60);
+
+      // Convert event time â†’ UTC â†’ broker time
+      datetime evUTC    = localTime - tzOffset;
+      datetime evBroker = evUTC + brokerOffset;
+
+      MqlDateTime evd;
+      TimeToStruct(evBroker, evd);
+      int evKey = evd.year*10000 + evd.mon*100 + evd.day;
+
+      // Only evaluate broker-today events
       if(evKey != todayKey) continue;
 
+      // Extract title
       string title = StringSubstr(ev, tpos + 9);
       int endq = StringFind(title, "\"");
       if(endq > 0) title = StringSubstr(title, 0, endq);
@@ -331,7 +353,9 @@ void FetchNewsFromFF()
       {
          if(StringFind(title, blockers[j]) >= 0)
          {
-            PrintFormat("NEWS BLOCKER TODAY: %s | %s", title, dateStr);
+            PrintFormat("NEWS BLOCKER TODAY: %s | %s",
+                        title,
+                        TimeToString(evBroker, TIME_DATE|TIME_MINUTES));
             foundAny = true;
             break;
          }
@@ -341,13 +365,14 @@ void FetchNewsFromFF()
    if(foundAny)
    {
       NO_TRADE_TODAY = true;
-      Print("🛑 Trading halted due to news blockers today");
+      Print("ðŸ›‘ Trading halted due to news blockers today");
    }
    else
    {
       Print("No blocking news today");
    }
 }
+
 
 
 
