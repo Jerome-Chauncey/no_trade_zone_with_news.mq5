@@ -23,6 +23,8 @@ input string  ExcludedDates     = "";       // back-test: "YYYY.MM.DD,..."
 //―――――― Globals & State ――――――――――――――――――――――――――――――――――――――――――
 CTrade    trade;
 string    Sym;
+bool SessionPrinted = false;
+
 
 // pending-stop tickets we placed
 ulong     BuyTicket       = 0;
@@ -219,6 +221,8 @@ int OnInit()
       }
       NTZRange = NTZHigh - NTZLow;
       DrawNTZBox();
+      NTZDefined = true;
+      PrintSessionSummary();
    }
 
    // âœ… Check todayâ€™s news immediately
@@ -302,8 +306,10 @@ void FetchNewsFromFF()
       "ECB",
       "Fed",
       "Retail Sales",
-      "Holiday"
+      "Holiday",
+      "CPI"
    };
+
 
    bool foundAny = false;
 
@@ -400,6 +406,7 @@ void OnTick()
       OrdersPlaced  =false;
       NTZDefined    =false;
       PositionOpened=false;
+      SessionPrinted = false;
       lastHour      =-1;
       AsiaHigh=-DBL_MAX; AsiaLow=DBL_MAX;
       NTZHigh=-DBL_MAX; NTZLow=DBL_MAX; NTZRange=0.0;
@@ -522,6 +529,7 @@ void OnTick()
    
          OrdersPlaced=true; 
          NTZDefined=true;
+         PrintSessionSummary();
          PrintFormat("✅ Orders placed — Asia:%.1f, NTZ:%.1f",
                      (AsiaHigh-AsiaLow)/(_Point*10.0),nP);
       }
@@ -546,6 +554,27 @@ void OnTick()
       PositionOpened=true;
 }
 
+
+void PrintSessionSummary()
+{
+   if(SessionPrinted) return;
+
+   if(AsiaHigh <= AsiaLow) return;
+   if(NTZRange <= 0) return;   // wait until NTZ is defined
+
+   double asiaPips = (AsiaHigh - AsiaLow) / (_Point * 10.0);
+   double ntzPips  = NTZRange / (_Point * 10.0);
+
+   PrintFormat("SESSION SUMMARY");
+   PrintFormat("Asia High: %.5f | Asia Low: %.5f | Asia Range: %.1f pips",
+               AsiaHigh, AsiaLow, asiaPips);
+
+   PrintFormat("NTZ High: %.5f | NTZ Low: %.5f | NTZ Range: %.1f pips",
+               NTZHigh, NTZLow, ntzPips);
+
+   SessionPrinted = true;
+}
+
 //+------------------------------------------------------------------+
 //| Helpers                                                          |
 //+------------------------------------------------------------------+
@@ -563,8 +592,10 @@ void PlacePendingOrders()
    double ask = SymbolInfoDouble(Sym, SYMBOL_ASK);
    double bid = SymbolInfoDouble(Sym, SYMBOL_BID);
 
-   double buyStopPrice  = NTZHigh + _Point;
-   double sellStopPrice = NTZLow  - _Point;
+   double pip = _Point * 10.0;
+
+   double buyStopPrice  = NTZHigh + pip;
+   double sellStopPrice = NTZLow  - pip;
 
    // Validation check
    if(buyStopPrice > ask && sellStopPrice < bid)
