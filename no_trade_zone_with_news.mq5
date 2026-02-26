@@ -289,27 +289,27 @@ void FetchNewsFromFF()
 
    string json = CharArrayToString(result);
 
-   // Broker day reference
    datetime nowBroker = TimeCurrent();
    MqlDateTime td;
    TimeToStruct(nowBroker, td);
    int todayKey = td.year*10000 + td.mon*100 + td.day;
 
-   // Broker â†” UTC offset
    int brokerOffset = (int)(TimeCurrent() - TimeGMT());
 
    string blockers[] =
    {
-      "Non-Farm Employment Change",
-      "Non-farm Employment Change",
+      "Non-Farm",
+      "Interest Rate",
+      "Rate Decision",
+      "Monetary Policy",
+      "Policy Statement",
       "FOMC",
-      "ECB",
       "Fed",
-      "Retail Sales",
-      "Holiday",
-      "CPI"
+      "ECB",
+      "Central Bank",
+      "Bank Holiday",
+      "Holiday"
    };
-
 
    bool foundAny = false;
 
@@ -322,10 +322,21 @@ void FetchNewsFromFF()
 
       int dpos = StringFind(ev, "\"date\":\"");
       int tpos = StringFind(ev, "\"title\":\"");
-      if(dpos < 0 || tpos < 0) continue;
+      int ipos = StringFind(ev, "\"impact\":\"");
 
-      // Full ISO timestamp with offset
-      // Example: 2026-02-05T04:00:00-05:00
+      if(dpos < 0 || tpos < 0 || ipos < 0)
+         continue;
+
+      // ---- ONLY HIGH IMPACT ----
+      string impact = StringSubstr(ev, ipos + 10);
+      int iend = StringFind(impact, "\"");
+      if(iend > 0)
+         impact = StringSubstr(impact, 0, iend);
+
+      if(impact != "High")
+         continue;
+
+      // ---- TIME CONVERSION ----
       string fullDate = StringSubstr(ev, dpos + 8, 25);
 
       string base = StringSubstr(fullDate, 0, 19);
@@ -333,13 +344,11 @@ void FetchNewsFromFF()
 
       datetime localTime = StringToTime(base);
 
-      // Parse timezone offset
       int sign  = (StringSubstr(tz, 0, 1) == "-" ? -1 : 1);
       int hours = (int)StringToInteger(StringSubstr(tz, 1, 2));
       int mins  = (int)StringToInteger(StringSubstr(tz, 4, 2));
       int tzOffset = sign * (hours*3600 + mins*60);
 
-      // Convert event time â†’ UTC â†’ broker time
       datetime evUTC    = localTime - tzOffset;
       datetime evBroker = evUTC + brokerOffset;
 
@@ -347,19 +356,21 @@ void FetchNewsFromFF()
       TimeToStruct(evBroker, evd);
       int evKey = evd.year*10000 + evd.mon*100 + evd.day;
 
-      // Only evaluate broker-today events
-      if(evKey != todayKey) continue;
+      if(evKey != todayKey)
+         continue;
 
-      // Extract title
+      // ---- TITLE EXTRACTION ----
       string title = StringSubstr(ev, tpos + 9);
       int endq = StringFind(title, "\"");
-      if(endq > 0) title = StringSubstr(title, 0, endq);
+      if(endq > 0)
+         title = StringSubstr(title, 0, endq);
 
+      // ---- STRATEGY MATCH ----
       for(int j = 0; j < ArraySize(blockers); j++)
       {
          if(StringFind(title, blockers[j]) >= 0)
          {
-            PrintFormat("NEWS BLOCKER TODAY: %s | %s",
+            PrintFormat("NEWS BLOCKER TODAY (HIGH): %s | %s",
                         title,
                         TimeToString(evBroker, TIME_DATE|TIME_MINUTES));
             foundAny = true;
@@ -371,11 +382,11 @@ void FetchNewsFromFF()
    if(foundAny)
    {
       NO_TRADE_TODAY = true;
-      Print("ðŸ›‘ Trading halted due to news blockers today");
+      Print("ðŸ›‘ Trading halted due to HIGH impact strategic news");
    }
    else
    {
-      Print("No blocking news today");
+      Print("No HIGH impact strategic blockers today");
    }
 }
 
