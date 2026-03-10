@@ -131,6 +131,26 @@ void CancelPendingOrders()
    Print("✔️ All pending STOP orders cleared");
 }
 
+bool HasPendingStops()
+{
+   int total = OrdersTotal();
+
+   for(int i=0;i<total;i++)
+   {
+      ulong ticket = OrderGetTicket(i);
+
+      if(OrderGetString(ORDER_SYMBOL) == Sym)
+      {
+         ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+
+         if(type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_SELL_STOP)
+            return true;
+      }
+   }
+
+   return false;
+}
+
 //+------------------------------------------------------------------+
 //| Expert initialization                                           |
 //+------------------------------------------------------------------+
@@ -151,37 +171,51 @@ void InitSessionSeparatorsAndNTZ()
    if(dt.hour >= 16) DrawSessionSeparator(todayStart + 16*3600, clrRed, PREF_NY);
 
    // âœ… Backfill NTZ box if past 10:00
-   if(dt.hour >= 10)
-   {
-      datetime frankStart = todayStart + 9*3600;
-      datetime frankEnd   = frankStart + 3600;
+   
+}
 
-      int startBar = iBarShift(Sym, PERIOD_M1, frankStart, false);
-      int endBar   = iBarShift(Sym, PERIOD_M1, frankEnd, false);
+//+------------------------------------------------------------------+
+//| DST SAFE SESSION ENGINE                                          |
+//+------------------------------------------------------------------+
 
-      NTZHigh = -DBL_MAX; NTZLow = DBL_MAX;
-      for(int i=startBar; i>=endBar; i--)
-      {
-         double hi = iHigh(Sym, PERIOD_M1, i);
-         double lo = iLow (Sym, PERIOD_M1, i);
-         if(hi>NTZHigh) NTZHigh=hi;
-         if(lo<NTZLow)  NTZLow=lo;
-      }
-      NTZRange = NTZHigh - NTZLow;
-      DrawNTZBox();
-   }
+int BrokerGMTOffset=0;
+
+datetime AsiaStart;
+datetime FrankfurtOpen;
+datetime LondonOpen;
+datetime NewYorkOpen;
+datetime LondonClose;
+
+datetime GMTToBroker(int hour,int minute=0)
+{
+   datetime gmtDay=StringToTime(TimeToString(TimeGMT(),TIME_DATE));
+   datetime gmtTime=gmtDay+hour*3600+minute*60;
+   return gmtTime+BrokerGMTOffset;
+}
+
+void UpdateSessionTimes()
+{
+   AsiaStart     =GMTToBroker(0,0);    // 00:00 GMT
+   FrankfurtOpen =GMTToBroker(7,0);    // 07:00 GMT
+   LondonOpen    =GMTToBroker(8,0);    // 08:00 GMT
+   NewYorkOpen   =GMTToBroker(13,0);   // 13:00 GMT
+   LondonClose   =GMTToBroker(16,0);   // 16:00 GMT
 }
 
 int OnInit()
 {
+   BrokerGMTOffset=(int)(TimeCurrent()-TimeGMT());
+   UpdateSessionTimes();
+   
    Sym = StringLen(TradeSymbol)>0 ? TradeSymbol : _Symbol;
    trade.SetExpertMagicNumber(MagicNumber);
+   
    EnsureRangeLabel();
-
-   datetime now = TimeCurrent(); 
+   
+   datetime now = TimeCurrent();
    MqlDateTime dt; TimeToStruct(now, dt);
    lastResetDate = dt.year*10000 + dt.mon*100 + dt.day;
-
+   
    NO_TRADE_TODAY=false;
    DoNotTradeDay =false;
    LondonClosed  =false;
@@ -190,40 +224,26 @@ int OnInit()
    NTZDefined    =false;
    PositionOpened=false;
    lastHour      =-1;
-   AsiaHigh=-DBL_MAX; AsiaLow=DBL_MAX;
-   NTZHigh=-DBL_MAX; NTZLow=DBL_MAX; NTZRange=0.0;
-
+   
+   AsiaHigh=-DBL_MAX;
+   AsiaLow=DBL_MAX;
+   NTZHigh=-DBL_MAX;
+   NTZLow=DBL_MAX;
+   NTZRange=0.0;
+   
    CancelPendingOrders();
    ClearDailyLines();
    EnsureRangeLabel();
-   InitSessionSeparatorsAndNTZ();
+  
+   
+   RebuildSessionState();
 
 
    // âœ… Immediately calculate Asian range up to now
-   if(dt.hour >= 3) InitAsiaRange();
+   
 
-   // âœ… If past 10:00, backfill NTZ range
-   if(dt.hour >= 10)
-   {
-      datetime frankStart = StringToTime(StringFormat("%04d.%02d.%02d 09:00", dt.year, dt.mon, dt.day));
-      datetime frankEnd   = frankStart + 3600;
-
-      int startBar = iBarShift(Sym, PERIOD_M1, frankStart, false);
-      int endBar   = iBarShift(Sym, PERIOD_M1, frankEnd, false);
-
-      NTZHigh = -DBL_MAX; NTZLow = DBL_MAX;
-      for(int i=startBar; i>=endBar; i--)
-      {
-         double hi = iHigh(Sym, PERIOD_M1, i);
-         double lo = iLow (Sym, PERIOD_M1, i);
-         if(hi>NTZHigh) NTZHigh=hi;
-         if(lo<NTZLow)  NTZLow=lo;
-      }
-      NTZRange = NTZHigh - NTZLow;
-      DrawNTZBox();
-      NTZDefined = true;
-      PrintSessionSummary();
-   }
+   
+   
 
    // âœ… Check todayâ€™s news immediately
    FetchNewsFromFF();
@@ -255,6 +275,79 @@ void InitAsiaRange()
    }
 }
 
+//+------------------------------------------------------------------+
+//| Rebuild session ranges if EA starts mid-day                     |
+//+------------------------------------------------------------------+
+void RebuildSessionState()
+{
+   datetime now=TimeCurrent();
+
+   // rebuild Asian range
+   if(now>=FrankfurtOpen)
+   {
+      AsiaHigh=-DBL_MAX;
+      AsiaLow =DBL_MAX;
+
+      int startBar=iBarShift(Sym,PERIOD_M1,AsiaStart,false);
+      int endBar  =iBarShift(Sym,PERIOD_M1,FrankfurtOpen,false);
+
+      for(int i=startBar;i>=endBar;i--)
+      {
+         double hi=iHigh(Sym,PERIOD_M1,i);
+         double lo=iLow(Sym,PERIOD_M1,i);
+
+         if(hi>AsiaHigh) AsiaHigh=hi;
+         if(lo<AsiaLow)  AsiaLow=lo;
+      }
+
+      double aP=(AsiaHigh-AsiaLow)/(_Point*10.0);
+
+      if(aP>AsiaThresholdPips)
+      {
+         DoNotTradeDay=true;
+         PrintFormat("Asia %.1f pips > %d halt",aP,AsiaThresholdPips);
+      }
+   }
+
+   // rebuild NTZ
+   if(now>=LondonOpen)
+   {
+      NTZHigh=-DBL_MAX;
+      NTZLow =DBL_MAX;
+
+      int startBar=iBarShift(Sym,PERIOD_M1,FrankfurtOpen,false);
+      int endBar  =iBarShift(Sym,PERIOD_M1,LondonOpen,false);
+
+      for(int i=startBar;i>=endBar;i--)
+      {
+         double hi=iHigh(Sym,PERIOD_M1,i);
+         double lo=iLow(Sym,PERIOD_M1,i);
+
+         if(hi>NTZHigh) NTZHigh=hi;
+         if(lo<NTZLow)  NTZLow=lo;
+      }
+
+      NTZRange=NTZHigh-NTZLow;
+      double nP = NTZRange / (_Point*10.0);
+
+      if(nP < 10.0 || nP > 30.0)
+      {
+         DoNotTradeDay = true;
+         PrintFormat("NTZ %.1f pips outside [10-30]. No trade today.", nP);
+      }
+      NTZDefined=true;
+      frankOpen=FrankfurtOpen;
+
+      DrawNTZBox();
+      PrintSessionSummary();
+      
+      if(HasPendingStops())
+      {
+         OrdersPlaced = true;
+         Print("Existing pending orders detected. EA synchronized.");
+      }
+   }
+}
 
 //+------------------------------------------------------------------+
 //| Expert deinitialization                                         |
@@ -448,7 +541,7 @@ void OnTick()
    }
 
    // 2) London-close flat @19:00
-   if(!LondonClosed && dt.hour>=19)
+   if(!LondonClosed && now>=LondonClose)
    {
       CancelPendingOrders();
       if(PositionSelect(Sym))
@@ -463,8 +556,9 @@ void OnTick()
    {
       uint w=(uint)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
       ObjectSetInteger(0,OBJ_RANGE,OBJPROP_XDISTANCE,(int)w/2);
-      double aP=(AsiaHigh>AsiaLow? (AsiaHigh-AsiaLow)/(_Point*10.0):0.0);
-      double nP=(NTZRange>0 ? NTZRange/(_Point*10.0) :0.0);
+      double pip = SymbolInfoDouble(Sym,SYMBOL_POINT) * 10;
+      double aP=(AsiaHigh>AsiaLow? (AsiaHigh-AsiaLow)/pip :0.0);
+      double nP=(NTZRange>0 ? NTZRange/pip :0.0);
       string txt = StringFormat("📊 Asian Range: %.1f pips\n📊 NTZ Range: %.1f pips",aP,nP);
       ObjectSetString(0,OBJ_RANGE,OBJPROP_TEXT,txt);
       
@@ -477,50 +571,66 @@ void OnTick()
    }
 
    // 4) session separators
-   if(dt.hour!=lastHour && dt.min==0)
+   if(now>=AsiaStart && lastHour<1)
    {
-      lastHour=dt.hour;
-      switch(dt.hour)
-      {
-         case 3:  DrawSessionSeparator(now,clrYellow,PREF_ASIAN); break;
-         case 9:  DrawSessionSeparator(now,clrBlue,  PREF_FRANK); break;
-         case 10: DrawSessionSeparator(now,clrGreen, PREF_LON);   break;
-         case 16: DrawSessionSeparator(now,clrRed,   PREF_NY);    break;
-      }
+      DrawSessionSeparator(AsiaStart,clrYellow,PREF_ASIAN);
+      lastHour=1;
+   }
+   
+   if(now>=FrankfurtOpen && lastHour<2)
+   {
+      DrawSessionSeparator(FrankfurtOpen,clrBlue,PREF_FRANK);
+      lastHour=2;
+   }
+   
+   if(now>=LondonOpen && lastHour<3)
+   {
+      DrawSessionSeparator(LondonOpen,clrGreen,PREF_LON);
+      lastHour=3;
+   }
+   
+   if(now>=NewYorkOpen && lastHour<4)
+   {
+      DrawSessionSeparator(NewYorkOpen,clrRed,PREF_NY);
+      lastHour=4;
    }
 
    // 5) bail if blocked
    if(NO_TRADE_TODAY||DoNotTradeDay) return;
 
    // 6) build Asia 03–09
-   if(dt.hour>=3 && dt.hour<9)
+   if(now>=AsiaStart && now<FrankfurtOpen)
    {
       AsiaHigh=MathMax(AsiaHigh,iHigh(Sym,PERIOD_M1,0));
-      AsiaLow =MathMin(AsiaLow, iLow (Sym,PERIOD_M1,0));
+      AsiaLow=MathMin(AsiaLow,iLow(Sym,PERIOD_M1,0));
    }
 
    // 7) 09:00 NTZ start & threshold
-   if(dt.hour==9 && dt.min==0 && frankOpen==0)
+   if(now>=FrankfurtOpen && frankOpen==0)
    {
       double aP=(AsiaHigh-AsiaLow)/(_Point*10.0);
+   
       if(aP>AsiaThresholdPips)
       {
          DoNotTradeDay=true;
-         PrintFormat("🛑 Asia %.1f pips > %d → halt",aP,AsiaThresholdPips);
+         PrintFormat("Asia %.1f pips > %d halt",aP,AsiaThresholdPips);
       }
-      frankOpen=now;
+   
+      frankOpen=FrankfurtOpen;
    }
+   
 
    // 8) build NTZ 09–10
-   if(frankOpen>0 && now<frankOpen+3600)
+   if(now>=FrankfurtOpen && now<LondonOpen)
    {
       NTZHigh=MathMax(NTZHigh,iHigh(Sym,PERIOD_M1,0));
-      NTZLow =MathMin(NTZLow, iLow (Sym,PERIOD_M1,0));
+      NTZLow=MathMin(NTZLow,iLow(Sym,PERIOD_M1,0));
    }
+   
 
    // 9) place stops 09:57–10:00
-   if(frankOpen>0 && !OrdersPlaced
-      && now>=frankOpen+57*60 && now<frankOpen+60*60)
+   if(frankOpen>0 && !OrdersPlaced && !HasPendingStops()
+      && now>=LondonOpen-180 && now<LondonOpen)
    {
       NTZRange=NTZHigh-NTZLow;
       double nP=NTZRange/(_Point*10.0);
@@ -550,12 +660,12 @@ void OnTick()
 
 
    // 10) cancel unfilled stops by 3h after frankOpen
-   if(!PositionOpened        // **only if no fill yet**
-      && OrdersPlaced        // stops are live
+   if(!PositionOpened
+      && HasPendingStops()
       && frankOpen>0
       && TimeCurrent()>=frankOpen+3*3600)
    {
-      Print("⌛ 3h passed without fill → canceling stops");
+      Print("3 hours passed without fill. Canceling stops.");
       CancelPendingOrders();
    }
 
