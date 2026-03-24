@@ -11,7 +11,7 @@
 
 #include <Trade\Trade.mqh>
 
-//―――――――――― Inputs ――――――――――――――――――――――――――――――――――――――――――――
+//â€•â€•â€•â€•â€•â€•â€•â€•â€•â€• Inputs â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•
 input string  TradeSymbol       = "";       // "" = current chart symbol
 input double  LotSize           = 0.10;     // lots per trade
 input int     Slippage          = 5;        // slippage in points
@@ -20,10 +20,11 @@ input int     AsiaThresholdPips = 40;       // skip if Asia > this
 input int     TargetCount       = 10;       // TP steps per side
 input string  ExcludedDates     = "";       // back-test: "YYYY.MM.DD,..."
 
-//―――――― Globals & State ――――――――――――――――――――――――――――――――――――――――――
+//â€•â€•â€•â€•â€•â€• Globals & State â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•â€•
 CTrade    trade;
 string    Sym;
 bool SessionPrinted = false;
+string TradeBlockReason = "None";
 
 
 // pending-stop tickets we placed
@@ -33,6 +34,7 @@ ulong     SellTicket      = 0;
 bool      NO_TRADE_TODAY  = false;  // blocked by CSV
 bool      DoNotTradeDay   = false;  // Asia-too-big or manual
 bool      LondonClosed    = false;  // have we run the 19:00 cleanup?
+bool      DailyResetDone  = false;
 int       lastResetDate   = 0;      // YYYYMMDD
 
 double    AsiaHigh = -DBL_MAX, AsiaLow = DBL_MAX;
@@ -45,6 +47,9 @@ datetime  frankOpen      = 0;
 bool      OrdersPlaced   = false;
 bool      NTZDefined     = false;
 bool      PositionOpened = false;
+datetime LastHeartbeat = 0;
+double   LastAsiaHigh  = 0;
+double   LastNTZHigh   = 0;
 int       lastHour       = -1;
 
 // object names
@@ -56,6 +61,8 @@ int       lastHour       = -1;
 #define OBJ_LOW        "NTZ_Low"
 #define OBJ_INFO       "NTZ_Info"
 #define OBJ_RANGE      "Asia_NTZ_Range"
+#define OBJ_STATUS     "NTZ_Status"
+#define OBJ_STATUS_BG  "NTZ_Status_BG"
 
 //+------------------------------------------------------------------+
 //| CSV blocker: skip on NFP, FOMC, ECB, Fed, Retail Sales, Holiday  |
@@ -75,6 +82,7 @@ void ClearDailyLines()
    ObjectDelete(0,OBJ_HIGH);
    ObjectDelete(0,OBJ_LOW);
    ObjectDelete(0,OBJ_INFO);
+   ObjectDelete(0, "NTZ_Box");
    for(int i=1;i<=TargetCount;i++)
    {
       ObjectDelete(0,StringFormat("TPB_%d",i));
@@ -128,7 +136,7 @@ void CancelPendingOrders()
       }
    }
    OrdersPlaced=false;
-   Print("✔️ All pending STOP orders cleared");
+   Print("âœ”ï¸ All pending STOP orders cleared");
 }
 
 bool HasPendingStops()
@@ -163,14 +171,15 @@ void InitSessionSeparatorsAndNTZ()
 
    // Asia starts 03:00
    if(dt.hour >= 3)  DrawSessionSeparator(todayStart + 3*3600, clrYellow, PREF_ASIAN);
-   // Frankfurt starts 09:00
-   if(dt.hour >= 9)  DrawSessionSeparator(todayStart + 9*3600, clrBlue, PREF_FRANK);
-   // London starts 10:00
-   if(dt.hour >= 10) DrawSessionSeparator(todayStart + 10*3600, clrGreen, PREF_LON);
+   // Frankfurt starts 10:00
+   if(dt.hour >= 10) DrawSessionSeparator(todayStart + 10*3600, clrBlue, PREF_FRANK);
+
+   // London starts 11:00
+   if(dt.hour >= 11) DrawSessionSeparator(todayStart + 11*3600, clrGreen, PREF_LON);
    // New York starts 16:00
    if(dt.hour >= 16) DrawSessionSeparator(todayStart + 16*3600, clrRed, PREF_NY);
 
-   // âœ… Backfill NTZ box if past 10:00
+   // Ã¢Å“â€¦ Backfill NTZ box if past 10:00
    
 }
 
@@ -195,17 +204,18 @@ datetime GMTToBroker(int hour,int minute=0)
 
 void UpdateSessionTimes()
 {
-   AsiaStart     =GMTToBroker(0,0);    // 00:00 GMT
-   FrankfurtOpen =GMTToBroker(7,0);    // 07:00 GMT
-   LondonOpen    =GMTToBroker(8,0);    // 08:00 GMT
-   NewYorkOpen   =GMTToBroker(13,0);   // 13:00 GMT
-   LondonClose   =GMTToBroker(16,0);   // 16:00 GMT
+   AsiaStart     = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 03:00"); // OK
+   FrankfurtOpen = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 10:00");
+   LondonOpen    = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 11:00");
+   NewYorkOpen   = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 16:00"); // OK
+   LondonClose   = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 19:00"); // OK
 }
 
 int OnInit()
 {
    BrokerGMTOffset=(int)(TimeCurrent()-TimeGMT());
    UpdateSessionTimes();
+   EventSetTimer(60);
    
    Sym = StringLen(TradeSymbol)>0 ? TradeSymbol : _Symbol;
    trade.SetExpertMagicNumber(MagicNumber);
@@ -239,15 +249,15 @@ int OnInit()
    RebuildSessionState();
 
 
-   // âœ… Immediately calculate Asian range up to now
+   // Ã¢Å“â€¦ Immediately calculate Asian range up to now
    
 
    
    
 
-   // âœ… Check todayâ€™s news immediately
+   // Ã¢Å“â€¦ Check todayÃ¢â‚¬â„¢s news immediately
    FetchNewsFromFF();
-   if(NO_TRADE_TODAY) Print("ðŸ›‘ Halted for CSV blocker");
+   if(NO_TRADE_TODAY) Print("Ã°Å¸â€ºâ€˜ Halted for CSV blocker");
 
    return(INIT_SUCCEEDED);
 }
@@ -265,7 +275,16 @@ void InitAsiaRange()
 
    int startBar = iBarShift(Sym, PERIOD_M1, asiaStart, false);
    int endBar   = iBarShift(Sym, PERIOD_M1, now, false);
-
+   
+   if(startBar == -1 || endBar == -1) return;
+   
+   if(startBar < endBar)
+   {
+      int tmp = startBar;
+      startBar = endBar;
+      endBar = tmp;
+   }
+   
    for(int i=startBar; i>=endBar; i--)
    {
       double hi = iHigh(Sym, PERIOD_M1, i);
@@ -281,17 +300,30 @@ void InitAsiaRange()
 void RebuildSessionState()
 {
    datetime now=TimeCurrent();
-
+   
    // rebuild Asian range
-   if(now>=FrankfurtOpen)
-   {
-      AsiaHigh=-DBL_MAX;
-      AsiaLow =DBL_MAX;
+   AsiaHigh=-DBL_MAX;
+   AsiaLow =DBL_MAX;
+   
+   datetime asiaEnd = MathMin(TimeCurrent(), FrankfurtOpen);
 
-      int startBar=iBarShift(Sym,PERIOD_M1,AsiaStart,false);
-      int endBar  =iBarShift(Sym,PERIOD_M1,FrankfurtOpen,false);
-
-      for(int i=startBar;i>=endBar;i--)
+      if(!EnsureM1History(AsiaStart))
+      {
+         Print("ERROR Cannot rebuild Asia range. Missing history.");
+         return;
+      }
+      
+      int startBar = iBarShift(Sym, PERIOD_M1, AsiaStart, false);
+      int endBar   = iBarShift(Sym, PERIOD_M1, asiaEnd, false);
+      
+      if(startBar < endBar)
+      {
+         int tmp = startBar;
+         startBar = endBar;
+         endBar = tmp;
+      }
+      
+      for(int i=startBar; i>=endBar; i--)
       {
          double hi=iHigh(Sym,PERIOD_M1,i);
          double lo=iLow(Sym,PERIOD_M1,i);
@@ -307,7 +339,9 @@ void RebuildSessionState()
          DoNotTradeDay=true;
          PrintFormat("Asia %.1f pips > %d halt",aP,AsiaThresholdPips);
       }
-   }
+      Print("AsiaStart: ", TimeToString(AsiaStart));
+      Print("FrankfurtOpen: ", TimeToString(FrankfurtOpen));
+   
 
    // rebuild NTZ
    if(now>=LondonOpen)
@@ -315,10 +349,23 @@ void RebuildSessionState()
       NTZHigh=-DBL_MAX;
       NTZLow =DBL_MAX;
 
-      int startBar=iBarShift(Sym,PERIOD_M1,FrankfurtOpen,false);
-      int endBar  =iBarShift(Sym,PERIOD_M1,LondonOpen,false);
-
-      for(int i=startBar;i>=endBar;i--)
+      if(!EnsureM1History(FrankfurtOpen))
+      {
+         Print("ERROR Cannot rebuild NTZ. Missing history.");
+         return;
+      }
+      
+      int startBar = iBarShift(Sym, PERIOD_M1, FrankfurtOpen, false);
+      int endBar   = iBarShift(Sym, PERIOD_M1, LondonOpen, false);
+      
+      if(startBar < endBar)
+      {
+         int tmp = startBar;
+         startBar = endBar;
+         endBar = tmp;
+      }
+      
+      for(int i=startBar; i>=endBar; i--)
       {
          double hi=iHigh(Sym,PERIOD_M1,i);
          double lo=iLow(Sym,PERIOD_M1,i);
@@ -354,20 +401,20 @@ void RebuildSessionState()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   EventKillTimer();
    ClearDailyLines();
    ObjectDelete(0,OBJ_RANGE);
+   ObjectDelete(0,OBJ_STATUS);
+   ObjectDelete(0,OBJ_STATUS_BG);
 }
 
 //+------------------------------------------------------------------+
-//| Fetch news from Forex Factory JSON feed                         |
-//+------------------------------------------------------------------+
-
-//+------------------------------------------------------------------+
-//| Fetch news from Forex Factory JSON feed (filter by today)        |
+//| Fetch Forex Factory News                                         |
 //+------------------------------------------------------------------+
 void FetchNewsFromFF()
 {
-   NO_TRADE_TODAY = false;
+   NO_TRADE_TODAY   = false;
+   TradeBlockReason = "None";
 
    string url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
    uchar post[], result[];
@@ -420,14 +467,11 @@ void FetchNewsFromFF()
       if(dpos < 0 || tpos < 0 || ipos < 0)
          continue;
 
-      // ---- ONLY HIGH IMPACT ----
+      // ---- IMPACT ----
       string impact = StringSubstr(ev, ipos + 10);
       int iend = StringFind(impact, "\"");
       if(iend > 0)
          impact = StringSubstr(impact, 0, iend);
-
-      if(impact != "High")
-         continue;
 
       // ---- TIME CONVERSION ----
       string fullDate = StringSubstr(ev, dpos + 8, 25);
@@ -452,7 +496,7 @@ void FetchNewsFromFF()
       if(evKey != todayKey)
          continue;
 
-      // ---- TITLE EXTRACTION ----
+      // ---- TITLE ----
       string title = StringSubstr(ev, tpos + 9);
       int endq = StringFind(title, "\"");
       if(endq > 0)
@@ -463,33 +507,340 @@ void FetchNewsFromFF()
       {
          if(StringFind(title, blockers[j]) >= 0)
          {
-            PrintFormat("NEWS BLOCKER TODAY (HIGH): %s | %s",
-                        title,
-                        TimeToString(evBroker, TIME_DATE|TIME_MINUTES));
-            foundAny = true;
-            break;
+            // ---- HOLIDAY BLOCK ----
+            if(StringFind(title, "Holiday") >= 0 || 
+               StringFind(title, "Bank Holiday") >= 0)
+            {
+               PrintFormat("HOLIDAY BLOCKER: %s | %s",
+                           title,
+                           TimeToString(evBroker, TIME_DATE|TIME_MINUTES));
+
+               foundAny = true;
+               TradeBlockReason = "Bank Holiday";
+               break;
+            }
+
+            // ---- HIGH IMPACT BLOCK ----
+            if(impact == "High")
+            {
+               PrintFormat("HIGH IMPACT BLOCKER: %s | %s",
+                           title,
+                           TimeToString(evBroker, TIME_DATE|TIME_MINUTES));
+
+               foundAny = true;
+               TradeBlockReason = "High Impact News";
+               break;
+            }
          }
       }
+
+      if(foundAny)
+         break;
    }
 
+   // ---- FINAL DECISION ----
    if(foundAny)
    {
       NO_TRADE_TODAY = true;
-      Print("ðŸ›‘ Trading halted due to HIGH impact strategic news");
+
+      Print("Trading disabled today");
+      Print("Reason: ", TradeBlockReason);
    }
    else
    {
+      NO_TRADE_TODAY   = false;
+      TradeBlockReason = "None";
+
       Print("No HIGH impact strategic blockers today");
    }
 }
 
+//+------------------------------------------------------------------+
+//| Ensure M1 History Loaded                                         |
+//+------------------------------------------------------------------+
+bool EnsureM1History(datetime fromTime)
+{
+   int bars = iBars(Sym, PERIOD_M1);
+
+   if(bars <= 0)
+   {
+      Print("WARNING No M1 bars available");
+      return false;
+   }
+
+   int shift = iBarShift(Sym, PERIOD_M1, fromTime, false);
+
+   if(shift == -1)
+   {
+      Print("Loading M1 history...");
+
+      datetime now = TimeCurrent();
+
+      MqlRates rates[];
+      ArraySetAsSeries(rates,true);
+
+      int copied = CopyRates(Sym, PERIOD_M1, fromTime, now, rates);
+
+      if(copied <= 0)
+      {
+         Print("ERROR Failed to load M1 history");
+         return false;
+      }
+
+      Sleep(200);
+
+      shift = iBarShift(Sym, PERIOD_M1, fromTime, false);
+
+      if(shift == -1)
+      {
+         Print("ERROR History still unavailable");
+         return false;
+      }
+
+      Print("M1 history loaded successfully");
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Session Integrity Check                                          |
+//+------------------------------------------------------------------+
+void ValidateSessionState()
+{
+   static datetime lastCheck = 0;
+
+   // Check once every 60 seconds
+   if(TimeCurrent() - lastCheck < 60)
+      return;
+
+   lastCheck = TimeCurrent();
+
+   bool rebuildNeeded = false;
+
+   // Invalid Asia
+   if(AsiaHigh == -DBL_MAX || AsiaLow == DBL_MAX)
+      rebuildNeeded = true;
+
+   // Invalid NTZ after London open
+   if(TimeCurrent() >= LondonOpen)
+   {
+      if(NTZHigh == -DBL_MAX || NTZLow == DBL_MAX)
+         rebuildNeeded = true;
+   }
+
+   // Invalid range
+   if(AsiaHigh <= AsiaLow && TimeCurrent() >= FrankfurtOpen)
+      rebuildNeeded = true;
+
+   if(rebuildNeeded)
+   {
+      Print("WARNING Session state invalid. Rebuilding...");
+      RebuildSessionState();
+   }
+}
 
 
+//+------------------------------------------------------------------+
+//| Debug Status Panel                                               |
+//+------------------------------------------------------------------+
+void UpdateStatusPanel()
+{
+   int x = 10;
+   int y = 20;
+   int line = 14;
+
+   double pip = _Point * 10.0;
+   double asiaP = (AsiaHigh>AsiaLow)?(AsiaHigh-AsiaLow)/pip:0;
+   double ntzP  = (NTZRange>0)?NTZRange/pip:0;
+
+   string eaStatus="ACTIVE";
+   string asiaStatus="WAITING";
+   string ntzStatus="WAITING";
+   string tradeStatus="ENABLED";
+   string orderStatus = OrdersPlaced ? "PLACED" : "NOT PLACED";
+
+   datetime now=TimeCurrent();
+
+   if(now>=AsiaStart && now<FrankfurtOpen)
+      asiaStatus="BUILDING";
+   else if(now>=FrankfurtOpen)
+      asiaStatus="COMPLETE";
+
+   if(now>=FrankfurtOpen && now<LondonOpen)
+      ntzStatus="BUILDING";
+   else if(now>=LondonOpen && NTZDefined)
+      ntzStatus="COMPLETE";
+
+   if(NO_TRADE_TODAY || DoNotTradeDay)
+      tradeStatus="DISABLED";
+
+   string tradeDay = (NO_TRADE_TODAY || DoNotTradeDay) ? "NO" : "YES";
+
+   string lines[18];
+
+   lines[0]  = "NTZ EA STATUS";
+   lines[1]  = "---------------------------";
+   lines[2]  = "EA Status      : " + eaStatus;
+   lines[3]  = "Asia Session   : " + asiaStatus;
+   lines[4]  = "NTZ Session    : " + ntzStatus;
+   lines[5]  = "Orders         : " + orderStatus;
+   lines[6]  = "Trading        : " + tradeStatus;
+   lines[7]  = " ";
+   lines[8]  = "Trade Day      : " + tradeDay;
+   lines[9]  = "Reason         : " + TradeBlockReason;
+   lines[10] = " ";
+   lines[11] = "Ranges";
+   lines[12] = "Asia Range     : " + DoubleToString(asiaP,1) + " pips";
+   lines[13] = "NTZ Range      : " + DoubleToString(ntzP,1) + " pips";
+   lines[14] = " ";
+   lines[15] = "Session Times";
+   lines[16] = "Asia " + TimeToString(AsiaStart,TIME_MINUTES);
+   lines[17] = "London " + TimeToString(LondonOpen,TIME_MINUTES);
+
+   int totalLines = ArraySize(lines);
+   int panelHeight = (totalLines * line) + 20;
+
+   // Background Panel
+   if(ObjectFind(0,"NTZ_BG")==-1)
+   {
+      ObjectCreate(0,"NTZ_BG",OBJ_RECTANGLE_LABEL,0,0,0);
+      ObjectSetInteger(0,"NTZ_BG",OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,"NTZ_BG",OBJPROP_XDISTANCE,x);
+      ObjectSetInteger(0,"NTZ_BG",OBJPROP_YDISTANCE,y);
+      ObjectSetInteger(0,"NTZ_BG",OBJPROP_XSIZE,280);
+      ObjectSetInteger(0,"NTZ_BG",OBJPROP_BGCOLOR,clrBlack);
+      ObjectSetInteger(0,"NTZ_BG",OBJPROP_BORDER_COLOR,clrAqua);
+   }
+
+   // Dynamic height
+   ObjectSetInteger(0,"NTZ_BG",OBJPROP_YSIZE,panelHeight);
+
+   for(int i=0;i<totalLines;i++)
+   {
+      string name="NTZ_LINE_"+IntegerToString(i);
+
+      if(ObjectFind(0,name)==-1)
+      {
+         ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+         ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+         ObjectSetInteger(0,name,OBJPROP_COLOR,clrWhite);
+         ObjectSetInteger(0,name,OBJPROP_FONTSIZE,9);
+         ObjectSetString(0,name,OBJPROP_FONT,"Consolas");
+      }
+
+      ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x+10);
+      ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y+5+(i*line));
+      ObjectSetString(0,name,OBJPROP_TEXT,lines[i]);
+   }
+}
 
 
+//+------------------------------------------------------------------+
+//| EA Watchdog                                                      |
+//+------------------------------------------------------------------+
+void WatchdogMonitor()
+{
+   static datetime lastCheck = 0;
 
+   if(TimeCurrent() - lastCheck < 60)
+      return;
 
+   lastCheck = TimeCurrent();
 
+   bool rebuild = false;
+
+   // Asia stuck detection
+   if(TimeCurrent() > AsiaStart && TimeCurrent() < FrankfurtOpen)
+   {
+      if(AsiaHigh == LastAsiaHigh)
+      {
+         Print("WATCHDOG: Asia range not updating. Rebuilding...");
+         rebuild = true;
+      }
+
+      LastAsiaHigh = AsiaHigh;
+   }
+
+   // NTZ stuck detection
+   if(TimeCurrent() > FrankfurtOpen && TimeCurrent() < LondonOpen)
+   {
+      if(NTZHigh == LastNTZHigh)
+      {
+         Print("WATCHDOG: NTZ range not updating. Rebuilding...");
+         rebuild = true;
+      }
+
+      LastNTZHigh = NTZHigh;
+   }
+
+   // Invalid range detection
+   if(AsiaHigh <= AsiaLow && TimeCurrent() > FrankfurtOpen)
+   {
+      Print("WATCHDOG: Invalid Asia range detected");
+      rebuild = true;
+   }
+
+   if(rebuild)
+   {
+      Print("WATCHDOG: Rebuilding session state...");
+      RebuildSessionState();
+   }
+
+   LastHeartbeat = TimeCurrent();
+}
+
+void Heartbeat()
+{
+   static datetime last = 0;
+
+   if(TimeCurrent() - last >= 300)
+   {
+      Print("EA Heartbeat OK - ", TimeToString(TimeCurrent()));
+      last = TimeCurrent();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Restart Recovery                                                 |
+//+------------------------------------------------------------------+
+void RestartRecovery()
+{
+   static bool recovered = false;
+
+   if(recovered)
+      return;
+
+   // Check existing position
+   if(PositionSelect(Sym))
+   {
+      PositionOpened = true;
+      Print("Recovery: Existing position detected");
+   }
+
+   // Check pending orders
+   if(HasPendingStops())
+   {
+      OrdersPlaced = true;
+      Print("Recovery: Pending orders detected");
+   }
+
+   // Rebuild TP ladder if NTZ exists
+   if(NTZHigh != -DBL_MAX && NTZLow != DBL_MAX)
+   {
+      NTZRange = NTZHigh - NTZLow;
+
+      if(NTZRange > 0)
+      {
+         SetupTPLevels();
+         DrawTPLevels();
+
+         Print("Recovery: TP ladder rebuilt");
+      }
+   }
+
+   recovered = true;
+}
 
 //+------------------------------------------------------------------+
 //| Expert tick handler                                             |
@@ -497,12 +848,28 @@ void FetchNewsFromFF()
 void OnTick()
 {
    datetime now=TimeCurrent(); MqlDateTime dt; TimeToStruct(now,dt);
+   ValidateSessionState();
+   WatchdogMonitor();
+   Heartbeat();
+   RestartRecovery();
+   UpdateStatusPanel();
+   if(LondonClosed && now >= AsiaStart && now < FrankfurtOpen)
+   {
+      LondonClosed = false;
+      Print("New trading day started. EA reactivated.");
+   }
+   
+   if(LondonClosed && now < AsiaStart)
+   return;
 
    // 1) New-day reset
    int today=dt.year*10000+dt.mon*100+dt.day;
    if(today!=lastResetDate)
    {
+      UpdateSessionTimes();
       lastResetDate=today;
+      
+      DailyResetDone = false;
       NO_TRADE_TODAY=false;
       DoNotTradeDay =false;
       LondonClosed  =false;
@@ -514,6 +881,7 @@ void OnTick()
       lastHour      =-1;
       AsiaHigh=-DBL_MAX; AsiaLow=DBL_MAX;
       NTZHigh=-DBL_MAX; NTZLow=DBL_MAX; NTZRange=0.0;
+      ArrayFill(TPTrig, 0, ArraySize(TPTrig), false);
 
       CancelPendingOrders();
       ClearDailyLines();
@@ -521,7 +889,7 @@ void OnTick()
 
       
       FetchNewsFromFF();
-      if(NO_TRADE_TODAY) Print("🛑 Halted for CSV blocker");
+      if(NO_TRADE_TODAY) Print("ðŸ›‘ Halted for CSV blocker");
 
       if(!NO_TRADE_TODAY && StringLen(ExcludedDates)>0)
       {
@@ -533,24 +901,54 @@ void OnTick()
             if(ed.year==dt.year&&ed.mon==dt.mon&&ed.day==dt.day)
             {
                DoNotTradeDay=true;
-               PrintFormat("ℹ️ Halted for excluded %s",arr[i]);
+               PrintFormat("â„¹ï¸ Halted for excluded %s",arr[i]);
                break;
             }
          }
       }
    }
 
-   // 2) London-close flat @19:00
-   if(!LondonClosed && now>=LondonClose)
+   
+   // 2) London-close flat @19:00 (Run once only)
+   if(!DailyResetDone && now>=LondonClose)
    {
       CancelPendingOrders();
+   
       if(PositionSelect(Sym))
          trade.PositionClose(PositionGetInteger(POSITION_TICKET));
+   
       ClearDailyLines();
-      LondonClosed=true;
-      Print("✅ London-close flat & cleanup");
+   
+      // FULL RESET
+      NO_TRADE_TODAY  = false;
+      DoNotTradeDay   = false;
+   
+      frankOpen       = 0;
+      OrdersPlaced    = false;
+      NTZDefined      = false;
+      PositionOpened  = false;
+      SessionPrinted  = false;
+      lastHour        = -1;
+   
+      AsiaHigh = -DBL_MAX;
+      AsiaLow  = DBL_MAX;
+   
+      NTZHigh  = -DBL_MAX;
+      NTZLow   = DBL_MAX;
+      NTZRange = 0.0;
+   
+      ArrayFill(TPTrig, 0, ArraySize(TPTrig), false);
+   
+      UpdateSessionTimes();
+   
+      LondonClosed   = true;
+      DailyResetDone = true;
+   
+      Print("London close cleanup + FULL RESET complete");
    }
-   if(LondonClosed) return;  // stop until tomorrow
+   
+   
+   
 
    // 3) update bottom-center range label
    {
@@ -559,7 +957,7 @@ void OnTick()
       double pip = SymbolInfoDouble(Sym,SYMBOL_POINT) * 10;
       double aP=(AsiaHigh>AsiaLow? (AsiaHigh-AsiaLow)/pip :0.0);
       double nP=(NTZRange>0 ? NTZRange/pip :0.0);
-      string txt = StringFormat("📊 Asian Range: %.1f pips\n📊 NTZ Range: %.1f pips",aP,nP);
+      string txt = StringFormat("ðŸ“Š Asian Range: %.1f pips\nðŸ“Š NTZ Range: %.1f pips",aP,nP);
       ObjectSetString(0,OBJ_RANGE,OBJPROP_TEXT,txt);
       
       color c = clrWhite;
@@ -598,12 +996,16 @@ void OnTick()
    // 5) bail if blocked
    if(NO_TRADE_TODAY||DoNotTradeDay) return;
 
-   // 6) build Asia 03–09
-   if(now>=AsiaStart && now<FrankfurtOpen)
+   // 6) build Asia 03â€“09
+   if(now >= AsiaStart && now < FrankfurtOpen)
    {
-      AsiaHigh=MathMax(AsiaHigh,iHigh(Sym,PERIOD_M1,0));
-      AsiaLow=MathMin(AsiaLow,iLow(Sym,PERIOD_M1,0));
+      double hi = iHigh(Sym, PERIOD_M1, 1);
+      double lo = iLow(Sym, PERIOD_M1, 1);
+   
+      if(hi > AsiaHigh) AsiaHigh = hi;
+      if(lo < AsiaLow)  AsiaLow  = lo;
    }
+   
 
    // 7) 09:00 NTZ start & threshold
    if(now>=FrankfurtOpen && frankOpen==0)
@@ -620,15 +1022,27 @@ void OnTick()
    }
    
 
-   // 8) build NTZ 09–10
+   // 8) build NTZ 09â€“10 (use closed candles for stability)
    if(now>=FrankfurtOpen && now<LondonOpen)
    {
-      NTZHigh=MathMax(NTZHigh,iHigh(Sym,PERIOD_M1,0));
-      NTZLow=MathMin(NTZLow,iLow(Sym,PERIOD_M1,0));
+      NTZHigh=MathMax(NTZHigh,iHigh(Sym,PERIOD_M1,1));
+      NTZLow=MathMin(NTZLow,iLow(Sym,PERIOD_M1,1));
+      
+      static double lastLoggedNTZ = 0;
+
+      double currentNTZ = (NTZHigh - NTZLow) / (_Point * 10.0);
+      
+      if(MathAbs(currentNTZ - lastLoggedNTZ) > 0.5)
+      {
+         PrintFormat("DEBUG NTZ Update | High: %.5f | Low: %.5f | Range: %.1f pips",
+                     NTZHigh, NTZLow, currentNTZ);
+      
+         lastLoggedNTZ = currentNTZ;
+      }
    }
    
 
-   // 9) place stops 09:57–10:00
+   // 9) place stops 09:57â€“10:00
    if(frankOpen>0 && !OrdersPlaced && !HasPendingStops()
       && now>=LondonOpen-180 && now<LondonOpen)
    {
@@ -645,17 +1059,17 @@ void OnTick()
          PlacePendingOrders(); 
          DrawTPLevels();
    
-         // 👉 Call NTZ box here
+         // ðŸ‘‰ Call NTZ box here
          DrawNTZBox();
    
          OrdersPlaced=true; 
          NTZDefined=true;
          PrintSessionSummary();
-         PrintFormat("✅ Orders placed — Asia:%.1f, NTZ:%.1f",
+         PrintFormat("âœ… Orders placed â€” Asia:%.1f, NTZ:%.1f",
                      (AsiaHigh-AsiaLow)/(_Point*10.0),nP);
       }
       else
-         PrintFormat("🛑 NTZ %.1f pips outside [10–30] → halt",nP);
+         PrintFormat("ðŸ›‘ NTZ %.1f pips outside [10â€“30] â†’ halt",nP);
    }
 
 
@@ -675,6 +1089,10 @@ void OnTick()
       PositionOpened=true;
 }
 
+void OnTimer()
+{
+   OnTick();
+}
 
 void PrintSessionSummary()
 {
@@ -724,12 +1142,12 @@ void PlacePendingOrders()
       BuyTicket  = trade.BuyStop(LotSize, buyStopPrice, Sym, sellStopPrice, 0, 0, Slippage);
       SellTicket = trade.SellStop(LotSize, sellStopPrice, Sym, buyStopPrice, 0, 0, Slippage);
 
-      PrintFormat("✅ Orders placed | BuyStop: %.5f vs Ask: %.5f | SellStop: %.5f vs Bid: %.5f",
+      PrintFormat("âœ… Orders placed | BuyStop: %.5f vs Ask: %.5f | SellStop: %.5f vs Bid: %.5f",
                   buyStopPrice, ask, sellStopPrice, bid);
    }
    else
    {
-      PrintFormat("🛑 Invalid stop levels — BuyStop: %.5f vs Ask: %.5f | SellStop: %.5f vs Bid: %.5f",
+      PrintFormat("ðŸ›‘ Invalid stop levels â€” BuyStop: %.5f vs Ask: %.5f | SellStop: %.5f vs Bid: %.5f",
                   buyStopPrice, ask, sellStopPrice, bid);
    }
 }
@@ -807,7 +1225,7 @@ void ManageTakeProfits()
                                                   : TPLevels[(i-1)+TargetCount]));
             trade.PositionModify(tk,newSL,PositionGetDouble(POSITION_TP));
             TPTrig[i]=true;
-            PrintFormat("🔒 TP%d hit → SL=%.5f",i,newSL);
+            PrintFormat("ðŸ”’ TP%d hit â†’ SL=%.5f",i,newSL);
             break;
          }
       }
