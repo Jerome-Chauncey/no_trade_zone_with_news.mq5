@@ -204,11 +204,11 @@ datetime GMTToBroker(int hour,int minute=0)
 
 void UpdateSessionTimes()
 {
-   AsiaStart     = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 03:00"); // OK
-   FrankfurtOpen = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 10:00");
-   LondonOpen    = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 11:00");
-   NewYorkOpen   = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 16:00"); // OK
-   LondonClose   = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 19:00"); // OK
+   AsiaStart     = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 02:00"); // Tokyo start
+   FrankfurtOpen = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 09:00"); // Frankfurt DST
+   LondonOpen    = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 10:00"); // London DST
+   NewYorkOpen   = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 15:00"); // New York DST
+   LondonClose   = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 18:00"); // London Close DST
 }
 
 int OnInit()
